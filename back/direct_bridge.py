@@ -209,7 +209,12 @@ class DirectBridge:
         try:
             # Wait for registration message with proper format
             while robot_id is None:
-                raw_data = await reader.readline()
+                try:
+                    # Thêm timeout cho reader.readline()
+                    raw_data = await asyncio.wait_for(reader.readline(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Connection timeout for robot {robot_id}")
+                    break
                 if not raw_data:
                     logger.warning(f"❗ TCP client {client_ip}:{client_port} ngắt kết nối trước khi đăng ký")
                     return  # Exit the function to close connection
@@ -594,10 +599,7 @@ def transform_robot_message(message):
         # Trường hợp dữ liệu encoder
         if msg_type == "encoder":
             # Lấy giá trị rpm từ mảng data
-            rpm_array = message.get("data", [0, 0, 0])
-            if len(rpm_array) < 3:
-                rpm_array = rpm_array + [0] * (3 - len(rpm_array))
-                
+            rpm_array = message.get("data", [0, 0, 0])          
             transformed_message = {
                 "type": "encoder",
                 "robot_id": robot_id,
@@ -611,18 +613,8 @@ def transform_robot_message(message):
         # Trường hợp dữ liệu IMU (bno055)
         elif msg_type == "bno055":
             data = message.get("data", {})
-            
-            # Lấy euler angles từ data
             euler = data.get("euler", [0, 0, 0])
-            if len(euler) < 3:
-                euler = euler + [0] * (3 - len(euler))
-            
-            # Lấy quaternion từ data
             quaternion = data.get("quaternion", [1, 0, 0, 0])
-            if len(quaternion) < 4:
-                quaternion = quaternion + [0] * (4 - len(quaternion))
-            
-            # Lấy timestamp từ data hoặc sử dụng thời gian hiện tại
             timestamp = data.get("time", current_time)
             
             transformed_message = {
@@ -816,23 +808,99 @@ async def list_connections(request):
             "timestamp": time.time()
         }, status=500)
 
+@routes.post('/command/ip')
+async def send_command_by_ip(request):
+    """Gửi lệnh điều khiển đến robot theo IP"""
+    try:
+        data = await request.json()
+        ip = data.get('ip')
+        port = data.get('port', 12346)
+        command = data.get('command')
+        
+        if not ip or not command:
+            return web.json_response({"status": "error", "message": "Missing ip or command"})
+        
+        logger.info(f"Sending command to {ip}:{port}: {command}")
+        
+        # Thử kết nối với timeout dài hơn
+        try:
+            # Tăng timeout lên 3 giây
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port),
+                timeout=3.0
+            )
+            
+            # Gửi lệnh và thêm ký tự xuống dòng
+            writer.write(f"{command}\n".encode())
+            await writer.drain()
+            
+            # Đóng kết nối đúng cách
+            writer.close()
+            await writer.wait_closed()
+            
+            return web.json_response({"status": "success", "message": f"Command sent to {ip}:{port}"})
+        
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout connecting to {ip}:{port}")
+            return web.json_response({"status": "error", "message": f"Timeout connecting to {ip}:{port}"})
+        
+        except ConnectionRefusedError:
+            logger.error(f"Connection refused by {ip}:{port}")
+            return web.json_response({
+                "status": "error", 
+                "message": f"Connection refused by {ip}:{port}. Please check if the robot is running and accepting connections."
+            })
+        
+        except Exception as e:
+            logger.error(f"Error sending command to {ip}:{port}: {str(e)}")
+            return web.json_response({"status": "error", "message": str(e)})
+    
+    except Exception as e:
+        logger.error(f"Error processing command request: {str(e)}")
+        return web.json_response({"status": "error", "message": str(e)})
+# Thêm middleware xử lý CORS
 @middleware
 async def cors_middleware(request: Request, handler):
-    # Handle CORS preflight requests
     if request.method == 'OPTIONS':
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-            'Access-Control-Max-Age': '3600'
-        }
-        return web.Response(status=204, headers=headers)
+        # Xử lý preflight request
+        response = web.Response()
+    else:
+        # Xử lý request thông thường
+        response = await handler(request)
     
-    response = await handler(request)
+    # Thêm headers CORS cần thiết
+    response.headers['Access-Control-Allow-Origin'] = '*'  # Cho phép tất cả các origin
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'  # Cache preflight trong 1 giờ
     
-    # Add CORS headers to all responses
-    response.headers['Access-Control-Allow-Origin'] = '*'
     return response
+
+# Thay đổi trong hàm xử lý đăng ký của robot
+@routes.post('/register')
+async def register_robot(request):
+    try:
+        data = await request.json()
+        robot_id = data.get("robot_id")
+        client_ip = request.remote
+        
+        # Thêm IP và robot_id vào ConnectionManager
+        ConnectionManager.set_robot_ip(robot_id, client_ip)
+        
+        # Sử dụng tiếng Anh thay vì tiếng Việt
+        response = {
+            "type": "registration_response",
+            "status": "success",
+            "robot_id": robot_id,
+            "server_time": time.time(),
+            "client_ip": client_ip,
+            "client_port": request.transport.get_extra_info('peername')[1],
+            "message": f"Robot {robot_id} registered successfully from {client_ip}" # Thay vì tiếng Việt
+        }
+        
+        return web.json_response(response)
+    except Exception as e:
+        return web.json_response({"status": "error", "message": str(e)})
 
 # Main function
 async def main():

@@ -29,7 +29,7 @@ ChartJS.register(
 );
 
 // Performance optimization constants
-const MAX_HISTORY_POINTS = 10000;
+const MAX_HISTORY_POINTS = 10; // Giảm từ mức lớn hơn xuống chỉ 10 điểm
 const UI_UPDATE_INTERVAL = 20;
 
 // Cập nhật URL WebSocket để kết nối trực tiếp với DirectBridge
@@ -371,131 +371,44 @@ const IMUWidget: React.FC = () => {
       return;
     }
     
-    console.log(`Processing ${messageBuffer.current.length} IMU messages in batch`);
+    // Chỉ xử lý tin nhắn mới nhất
+    const latestMessage = messageBuffer.current[messageBuffer.current.length - 1];
+    messageBuffer.current = []; // Xóa buffer
     
-    // Get and process all messages
-    const messages = [...messageBuffer.current];
-    messageBuffer.current = []; // Clear buffer
-    
-    // Tổng hợp dữ liệu theo timestamp
-    const timestampMap: Map<string, {
-      roll: number,
-      pitch: number,
-      yaw: number,
-      quat_w: number,
-      quat_x: number,
-      quat_y: number,
-      quat_z: number,
-      timestamp: number
-    }> = new Map();
-    
-    // Xử lý tất cả tin nhắn để lấy giá trị mới nhất cho mỗi timestamp
-    for (const message of messages) {
-      if (message.type === 'imu_data') {
-        // Extract values
-        const roll = typeof message.roll === 'number' ? message.roll : 
-                    (message.orientation?.roll ?? 0);
-        const pitch = typeof message.pitch === 'number' ? message.pitch : 
-                     (message.orientation?.pitch ?? 0);
-        const yaw = typeof message.yaw === 'number' ? message.yaw : 
-                   (message.orientation?.yaw ?? 0);
-
-        // Extract quaternion values
-        const quat_w = typeof message.quat_w === 'number' ? message.quat_w : 
-                      (message.qw ?? 1.0);
-        const quat_x = typeof message.quat_x === 'number' ? message.quat_x : 
-                      (message.qx ?? 0.0);
-        const quat_y = typeof message.quat_y === 'number' ? message.quat_y : 
-                      (message.qy ?? 0.0);
-        const quat_z = typeof message.quat_z === 'number' ? message.quat_z : 
-                      (message.qz ?? 0.0);
-        
-        // Lấy timestamp từ dữ liệu
-        const timestamp = message.timestamp || Date.now() / 1000;
-        
-        // Lấy timestamp đã được làm tròn đến giây
-        const timeKey = getTimeForData(timestamp);
-        
-        // Cập nhật giá trị mới nhất cho timestamp này
-        timestampMap.set(timeKey, {
-          roll,
-          pitch,
-          yaw,
-          quat_w,
-          quat_x,
-          quat_y,
-          quat_z,
-          timestamp
-        });
-      }
-    }
-    
-    // Sử dụng giá trị mới nhất cho hiển thị realtime
-    if (timestampMap.size > 0) {
-      const latestValues = Array.from(timestampMap.values()).pop();
-      if (latestValues) {
-        setImuData(latestValues);
-      }
-    }
-    
-    // Chỉ cập nhật biểu đồ nếu không ở chế độ tạm dừng
-    if (!isPaused && timestampMap.size > 0) {
+    if (latestMessage.type === 'imu_data') {
+      // Cập nhật giá trị hiện tại
+      setImuData({
+        roll: latestMessage.roll || 0,
+        pitch: latestMessage.pitch || 0,
+        yaw: latestMessage.yaw || 0,
+        quat_w: latestMessage.quat_w || 1.0,
+        quat_x: latestMessage.quat_x || 0,
+        quat_y: latestMessage.quat_y || 0,
+        quat_z: latestMessage.quat_z || 0,
+        timestamp: latestMessage.timestamp || Date.now() / 1000
+      });
+      
+      // Sử dụng MAX_HISTORY_POINTS khi cập nhật lịch sử có giới hạn
       setHistory(prev => {
-        // Tạo mảng mới với các điểm đã tổng hợp, sắp xếp theo thời gian
-        const sortedEntries = Array.from(timestampMap.entries())
-          .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]));
-        
-        // Tách các mảng mới để thêm vào history
-        const newTimestamps = sortedEntries.map(([timeKey]) => timeKey);
-        const newOrientationRoll = sortedEntries.map(([, values]) => values.roll);
-        const newOrientationPitch = sortedEntries.map(([, values]) => values.pitch);
-        const newOrientationYaw = sortedEntries.map(([, values]) => values.yaw);
-        const newQuaternionW = sortedEntries.map(([, values]) => values.quat_w);
-        const newQuaternionX = sortedEntries.map(([, values]) => values.quat_x);
-        const newQuaternionY = sortedEntries.map(([, values]) => values.quat_y);
-        const newQuaternionZ = sortedEntries.map(([, values]) => values.quat_z);
-        
-        // Kết hợp với dữ liệu trước đó
-        const combinedTimestamps = [...prev.timestamps, ...newTimestamps];
-        
-        // Giới hạn số điểm trong history
-        if (combinedTimestamps.length > MAX_HISTORY_POINTS) {
-          return {
-            timestamps: combinedTimestamps.slice(-MAX_HISTORY_POINTS),
-            orientation: {
-              roll: [...prev.orientation.roll, ...newOrientationRoll].slice(-MAX_HISTORY_POINTS),
-              pitch: [...prev.orientation.pitch, ...newOrientationPitch].slice(-MAX_HISTORY_POINTS),
-              yaw: [...prev.orientation.yaw, ...newOrientationYaw].slice(-MAX_HISTORY_POINTS)
-            },
-            quaternion: {
-              w: [...prev.quaternion.w, ...newQuaternionW].slice(-MAX_HISTORY_POINTS),
-              x: [...prev.quaternion.x, ...newQuaternionX].slice(-MAX_HISTORY_POINTS),
-              y: [...prev.quaternion.y, ...newQuaternionY].slice(-MAX_HISTORY_POINTS),
-              z: [...prev.quaternion.z, ...newQuaternionZ].slice(-MAX_HISTORY_POINTS)
-            }
-          };
-        }
+        const timestamp = getTimeForData(latestMessage.timestamp || Date.now() / 1000);
         
         return {
-          timestamps: combinedTimestamps,
+          timestamps: [...prev.timestamps.slice(-MAX_HISTORY_POINTS + 1), timestamp],
           orientation: {
-            roll: [...prev.orientation.roll, ...newOrientationRoll],
-            pitch: [...prev.orientation.pitch, ...newOrientationPitch],
-            yaw: [...prev.orientation.yaw, ...newOrientationYaw]
+            roll: [...prev.orientation.roll.slice(-MAX_HISTORY_POINTS + 1), latestMessage.roll || 0],
+            pitch: [...prev.orientation.pitch.slice(-MAX_HISTORY_POINTS + 1), latestMessage.pitch || 0],
+            yaw: [...prev.orientation.yaw.slice(-MAX_HISTORY_POINTS + 1), latestMessage.yaw || 0]
           },
           quaternion: {
-            w: [...prev.quaternion.w, ...newQuaternionW],
-            x: [...prev.quaternion.x, ...newQuaternionX],
-            y: [...prev.quaternion.y, ...newQuaternionY],
-            z: [...prev.quaternion.z, ...newQuaternionZ]
+            w: [...prev.quaternion.w.slice(-MAX_HISTORY_POINTS + 1), latestMessage.quat_w || 1.0],
+            x: [...prev.quaternion.x.slice(-MAX_HISTORY_POINTS + 1), latestMessage.quat_x || 0],
+            y: [...prev.quaternion.y.slice(-MAX_HISTORY_POINTS + 1), latestMessage.quat_y || 0],
+            z: [...prev.quaternion.z.slice(-MAX_HISTORY_POINTS + 1), latestMessage.quat_z || 0]
           }
         };
       });
     }
-    
-    lastUIUpdateTime.current = Date.now();
-    console.log(`UI updated at ${new Date().toLocaleTimeString()} with ${timestampMap.size} data points`);
-  }, [isPaused]);
+  }, []);
 
   // Schedule UI updates using requestAnimationFrame for smoother performance
   const scheduleUIUpdate = useCallback(() => {
@@ -643,24 +556,20 @@ const IMUWidget: React.FC = () => {
           console.log("Processing IMU values:", values);
           
           // Cập nhật buffer
-          messageBuffer.current.push({
+          messageBuffer.current = [{
             type: 'imu_data',
-            ...values,
-            original: data
-          });
+            roll: values.roll,
+            pitch: values.pitch,
+            yaw: values.yaw,
+            quat_w: values.quat_w,
+            quat_x: values.quat_x,
+            quat_y: values.quat_y,
+            quat_z: values.quat_z,
+            timestamp: values.timestamp
+          }];
           
-          // Cập nhật timestamp gần nhất
-          lastDataTimestamp.current = values.timestamp;
-          
-          if (loading) {
-            setLoading(false);
-          }
-          
-          // Lên lịch cập nhật UI
+          // Cập nhật UI ngay lập tức
           scheduleUIUpdate();
-          
-          // Tăng bộ đếm tin nhắn
-          messageCounter.current++;
         }
       } catch (err) {
         console.error("Failed to parse WebSocket message:", err);

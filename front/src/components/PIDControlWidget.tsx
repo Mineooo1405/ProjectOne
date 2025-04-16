@@ -22,132 +22,122 @@ const PIDControlWidget: React.FC = () => {
   const [motorId, setMotorId] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const [isConnected, setIsConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [robotIP, setRobotIP] = useState("");
+  const [robotPort, setRobotPort] = useState(12346);
+  const [isConnected, setIsConnected] = useState(false);
+  const [robotsList, setRobotsList] = useState<{robot_id: string, ip: string}[]>([]);
+  const [autoIpFetching, setAutoIpFetching] = useState(false);
   
-  // Cập nhật robotId khi selectedRobotId thay đổi
+  // Tự động lấy danh sách robot và IP từ Direct Bridge
   useEffect(() => {
-    if (selectedRobotId) {
-      tcpWebSocketService.setRobotId(selectedRobotId);
-    }
-  }, [selectedRobotId]);
-  
-  // Kết nối đến DirectBridge WebSocket service
-  useEffect(() => {
-    // Xử lý thay đổi trạng thái kết nối
-    const handleConnectionChange = (connected: boolean) => {
-      console.log('Trạng thái kết nối DirectBridge đã thay đổi:', connected);
-      setIsConnected(connected);
-    };
+    fetchRobotsList();
     
-    // Xử lý phản hồi PID
-    const handlePidResponse = (response: any) => {
-      console.log('Nhận phản hồi PID:', response);
-      setIsSaving(false);
-      
-      if (response.status === 'success') {
-        setSaveStatus('success');
-        setTimeout(() => setSaveStatus('idle'), 3000);
-      } else {
-        setSaveStatus('error');
-        setErrorMessage(response.message || 'Unknown error');
-        setTimeout(() => setSaveStatus('idle'), 3000);
-      }
-    };
-    
-    // Đăng ký lắng nghe sự kiện
-    tcpWebSocketService.onConnectionChange(handleConnectionChange);
-    tcpWebSocketService.onMessage('pid_response', handlePidResponse);
-    tcpWebSocketService.onMessage('error', (error: any) => {
-      console.error('Lỗi từ server:', error);
-      setIsSaving(false);
-      setSaveStatus('error');
-      setErrorMessage(error.message || 'Unknown error');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    });
-    
-    // Kiểm tra trạng thái kết nối hiện tại
-    setIsConnected(tcpWebSocketService.isConnected());
-    
-    // Dọn dẹp khi unmount
-    return () => {
-      tcpWebSocketService.offConnectionChange(handleConnectionChange);
-      tcpWebSocketService.offMessage('pid_response', handlePidResponse);
-      tcpWebSocketService.offMessage('error', () => {});
-    };
+    // Cập nhật danh sách định kỳ mỗi 10 giây
+    const interval = setInterval(fetchRobotsList, 10000);
+    return () => clearInterval(interval);
   }, []);
-  
-  // Tự động kết nối khi component mount
+
+  // Cập nhật trạng thái kết nối dựa trên IP
   useEffect(() => {
-    // Cố gắng kết nối ngay khi component được tạo
-    if (!tcpWebSocketService.isConnected()) {
-      tcpWebSocketService.connect();
-    }
-  }, []);
-  
-  // Xử lý thay đổi đầu vào
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setPidValues(prev => ({
-      ...prev,
-      [name]: Number(value)
-    }));
-  };
-  
-  // Lưu và gửi cấu hình PID
-  const handleSave = async () => {
-    if (!isConnected) {
-      // Thử kết nối lại
-      tcpWebSocketService.connect();
-      setErrorMessage("Đang kết nối tới DirectBridge...");
-      setSaveStatus('error');
+    setIsConnected(!!robotIP);
+  }, [robotIP]);
+
+  // Lấy danh sách robot và IP của chúng
+  const fetchRobotsList = async () => {
+    try {
+      setAutoIpFetching(true);
+      const response = await fetch(`http://localhost:9004/robots-list`);
+      const data = await response.json();
       
-      // Đợi 2 giây rồi kiểm tra kết nối
-      setTimeout(() => {
-        if (tcpWebSocketService.isConnected()) {
-          // Nếu kết nối thành công, thử gửi lại
-          handleSave();
-        } else {
-          setErrorMessage("Không thể kết nối tới DirectBridge. Vui lòng thử lại.");
-          setTimeout(() => setSaveStatus('idle'), 3000);
+      if (data.status === 'success') {
+        setRobotsList(data.robots);
+        
+        // Tự động cập nhật IP nếu có robot được chọn
+        if (selectedRobotId) {
+          const robot = data.robots.find((r: {robot_id: string}) => r.robot_id === selectedRobotId);
+          if (robot) {
+            setRobotIP(robot.ip);
+          }
         }
-      }, 2000);
+      }
+    } catch (error) {
+      console.error("Không thể lấy danh sách robot:", error);
+    } finally {
+      setAutoIpFetching(false);
+    }
+  };
+
+  // Cập nhật IP khi robot được chọn thay đổi
+  useEffect(() => {
+    if (selectedRobotId && robotsList.length > 0) {
+      const robot = robotsList.find((r: {robot_id: string}) => r.robot_id === selectedRobotId);
+      if (robot) {
+        setRobotIP(robot.ip);
+      }
+    }
+  }, [selectedRobotId, robotsList]);
+
+  // Gửi lệnh PID trực tiếp theo IP
+  const sendPIDCommand = async () => {
+    if (!robotIP) {
+      setErrorMessage("IP của robot không có sẵn. Vui lòng đợi hệ thống tự động cập nhật hoặc chọn robot khác.");
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus('idle'), 3000);
       return;
     }
     
     setIsSaving(true);
-    setSaveStatus('idle');
     setErrorMessage(null);
     
     try {
-      // Gửi cấu hình PID
-      const success = tcpWebSocketService.sendPidConfig(
-        selectedRobotId,
-        motorId,
-        pidValues
-      );
+      // Format theo định dạng mà ESP32 mong đợi
+      const command = `MOTOR:${motorId} Kp:${pidValues.kp} Ki:${pidValues.ki} Kd:${pidValues.kd}`;
       
-      if (!success) {
-        throw new Error("Không thể gửi thông số PID");
+      const response = await fetch(`http://localhost:9004/command/ip`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          ip: robotIP,
+          port: robotPort,
+          command: command
+        })
+      });
+      
+      const data = await response.json();
+      
+      setIsSaving(false);
+      
+      if (data.status === 'success') {
+        setSaveStatus('success');
+        setTimeout(() => setSaveStatus('idle'), 3000);
+      } else {
+        setSaveStatus('error');
+        setErrorMessage(data.message || "Không thể gửi thông số PID");
+        setTimeout(() => setSaveStatus('idle'), 3000);
       }
-      
-      // Đặt timeout để tự động hiển thị thành công nếu không nhận được phản hồi
-      setTimeout(() => {
-        if (isSaving) {
-          setIsSaving(false);
-          setSaveStatus('success');
-          setTimeout(() => setSaveStatus('idle'), 3000);
-        }
-      }, 5000);
-      
     } catch (error) {
+      setIsSaving(false);
       setSaveStatus('error');
       setErrorMessage(error instanceof Error ? error.message : "Lỗi không xác định");
-      setIsSaving(false);
       setTimeout(() => setSaveStatus('idle'), 3000);
+      console.error("Lỗi khi gửi lệnh PID:", error);
     }
   };
-  
+
+  // Xử lý thay đổi giá trị input
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    const numValue = parseFloat(value);
+    
+    setPidValues(prev => ({
+      ...prev,
+      [name]: numValue
+    }));
+  };
+
   // Khôi phục giá trị mặc định
   const resetToDefaults = () => {
     setPidValues({
@@ -155,21 +145,29 @@ const PIDControlWidget: React.FC = () => {
       ki: 0.1,
       kd: 0.01
     });
-    setSaveStatus('idle');
-    setErrorMessage(null);
   };
-  
-  // Kết nối đến DirectBridge
+
+  // Kết nối đến robot
   const connect = () => {
-    tcpWebSocketService.connect();
+    if (robotIP) {
+      setIsConnected(true);
+    } else {
+      setErrorMessage("Không có địa chỉ IP robot. Vui lòng đợi cập nhật tự động.");
+      setTimeout(() => setErrorMessage(null), 3000);
+    }
   };
-  
+
   // Ngắt kết nối
   const disconnect = () => {
-    tcpWebSocketService.disconnect();
+    setIsConnected(false);
+  };
+
+  // Xử lý lưu cấu hình PID - giờ chỉ dùng một phương thức duy nhất
+  const handleSave = async () => {
+    await sendPIDCommand();
   };
   
-  // Render UI
+  // Render UI với hiển thị IP tự động
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
@@ -212,6 +210,39 @@ const PIDControlWidget: React.FC = () => {
           <option value={2}>Motor 2</option>
           <option value={3}>Motor 3</option>
         </select>
+      </div>
+
+      <div className="mt-4 p-3 border rounded-lg bg-gray-50">
+        <div className="font-medium mb-2">Kết nối tới robot</div>
+        <div className="space-y-2">
+          <div className="flex gap-2">
+            <div className="flex-grow">
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Địa chỉ IP (tự động)
+              </label>
+              <input
+                type="text"
+                value={robotIP}
+                readOnly
+                className="w-full border rounded-md px-2 py-1 text-sm bg-gray-100"
+              />
+              <div className="text-xs text-gray-500 mt-1">
+                {autoIpFetching ? 'Đang lấy IP...' : `IP của robot ${selectedRobotId || '(chưa chọn)'}`}
+              </div>
+            </div>
+            <div className="w-24">
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Cổng
+              </label>
+              <input
+                type="number"
+                value={robotPort}
+                onChange={(e) => setRobotPort(parseInt(e.target.value) || 12346)}
+                className="w-full border rounded-md px-2 py-1 text-sm"
+              />
+            </div>
+          </div>
+        </div>
       </div>
       
       {/* Slider và Input cho các thông số PID */}

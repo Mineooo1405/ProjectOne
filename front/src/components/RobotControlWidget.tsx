@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import WidgetConnectionHeader from "./WidgetConnectionHeader";
 import { RotateCcw, AlertCircle, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, RotateCw, RotateCcw as RotateCounter } from 'lucide-react';
-import tcpWebSocketService from '../services/TcpWebSocketService';
 import { useRobotContext } from './RobotContext';
 
 interface RPMData {
@@ -27,19 +26,41 @@ type KeysPressed = {
   e: boolean; // Xoay phải
 };
 
+// Interface cho Direct Command API
+interface DirectCommandRequest {
+  ip: string;
+  port: number;
+  command: string;
+}
+
+interface DirectCommandResponse {
+  status: string;
+  message?: string;
+}
+
+const API_ENDPOINT = 'http://localhost:9004';
+
 const RobotControlWidget: React.FC = () => {
   const { selectedRobotId } = useRobotContext();
+  
+  // State hiện tại
   const [motorSpeeds, setMotorSpeeds] = useState<number[]>([0, 0, 0]);
   const [rpmValues, setRpmValues] = useState<RPMData>({1: 0, 2: 0, 3: 0});
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<'joystick' | 'motors' | 'keyboard'>('keyboard'); // Mặc định chọn keyboard
+  const [activeTab, setActiveTab] = useState<'joystick' | 'motors' | 'keyboard'>('keyboard');
   const [velocities, setVelocities] = useState({ x: 0, y: 0, theta: 0 });
   const [maxSpeed, setMaxSpeed] = useState(1.0); // m/s
   const [maxAngular, setMaxAngular] = useState(2.0); // rad/s
-  const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const [keysPressed, setKeysPressed] = useState<KeysPressed>({ w: false, a: false, s: false, d: false, q: false, e: false });
   const [hasFocus, setHasFocus] = useState(false);
+  const [robotIP, setRobotIP] = useState("");
+  const [robotPort, setRobotPort] = useState(12346);
+  const [commandSending, setCommandSending] = useState(false);
+  
+  // Thêm state để lưu danh sách robot và IP
+  const [robotsList, setRobotsList] = useState<{robot_id: string, ip: string}[]>([]);
+  const [autoIpFetching, setAutoIpFetching] = useState(false);
   
   // Refs for joystick control
   const joystickRef = useRef<HTMLDivElement>(null);
@@ -49,75 +70,111 @@ const RobotControlWidget: React.FC = () => {
   const isDraggingRef = useRef(false);
   const isRotatingRef = useRef(false);
   const prevVelocitiesRef = useRef({ x: 0, y: 0, theta: 0 });
-  
-  // TCP WebSocket Connection
+  const commandThrottleRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Check connection status based on IP availability
   useEffect(() => {
-    // Handle connection status changes
-    const handleConnectionChange = (connected: boolean) => {
-      setIsConnected(connected);
-      setStatus(connected ? 'connected' : 'disconnected');
+    setStatus(robotIP ? 'connected' : 'disconnected');
+  }, [robotIP]);
+  
+  // Tự động lấy danh sách robot và IP từ Direct Bridge khi component mount
+  useEffect(() => {
+    fetchRobotsList();
+    
+    // Cập nhật danh sách định kỳ mỗi 10 giây
+    const interval = setInterval(fetchRobotsList, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Lấy danh sách robot và IP của chúng
+  const fetchRobotsList = async () => {
+    try {
+      setAutoIpFetching(true);
+      const response = await fetch(`${API_ENDPOINT}/robots-list`);
+      const data = await response.json();
       
-      if (connected) {
-        // Request initial data when first connected
-        tcpWebSocketService.sendMessage({
-          type: "get_motor_data",
-          robot_id: selectedRobotId,
-          frontend: true,
-          timestamp: Date.now() / 1000
-        });
-      }
-    };
-    
-    // Register for connection status changes
-    tcpWebSocketService.onConnectionChange(handleConnectionChange);
-    
-    // Handle incoming messages
-    const handleMessage = (message: any) => {
-      try {
-        if (message.type === "motor_data" && message.rpm) {
-          setRpmValues(typeof message.rpm === 'object' ? message.rpm : 
-            Array.isArray(message.rpm) ? {1: message.rpm[0] || 0, 2: message.rpm[1] || 0, 3: message.rpm[2] || 0} : 
-            rpmValues);
-        } else if (message.type === "error") {
-          setErrorMessage(message.message || "An error occurred");
-          setTimeout(() => setErrorMessage(""), 5000);
+      if (data.status === 'success') {
+        setRobotsList(data.robots);
+        
+        // Tự động cập nhật IP nếu có robot được chọn
+        if (selectedRobotId) {
+            const robot = data.robots.find((r: {robot_id: string, ip: string}) => r.robot_id === selectedRobotId);
+          if (robot) {
+            setRobotIP(robot.ip);
+            setStatus('connected');
+          }
         }
-      } catch (e) {
-        console.error("Error processing message", e);
       }
-    };
-    
-    // Register for message events
-    tcpWebSocketService.onMessage("motor_data", handleMessage);
-    tcpWebSocketService.onMessage("error", handleMessage);
-    
-    // Connect to TCP server if not already connected
-    if (!tcpWebSocketService.isConnected()) {
-      connect();
-    } else {
-      setIsConnected(true);
-      setStatus('connected');
+    } catch (error) {
+      console.error("Không thể lấy danh sách robot:", error);
+    } finally {
+      setAutoIpFetching(false);
+    }
+  };
+
+  // Cập nhật IP khi robot được chọn thay đổi
+  useEffect(() => {
+    if (selectedRobotId && robotsList.length > 0) {
+      const robot = robotsList.find((r: {robot_id: string, ip: string}) => r.robot_id === selectedRobotId);
+      if (robot) {
+        setRobotIP(robot.ip);
+        setStatus('connected');
+      }
+    }
+  }, [selectedRobotId, robotsList]);
+
+  // Helper function to send command to the robot
+  const sendDirectCommand = async (command: string): Promise<void> => {
+    if (!robotIP) {
+      setErrorMessage("IP của robot không có sẵn. Vui lòng đợi hệ thống tự động cập nhật hoặc chọn robot khác.");
+      setTimeout(() => setErrorMessage(""), 5000);
+      return;
     }
     
-    // Cleanup on unmount
-    return () => {
-      tcpWebSocketService.offConnectionChange(handleConnectionChange);
-      tcpWebSocketService.offMessage("motor_data", handleMessage);
-      tcpWebSocketService.offMessage("error", handleMessage);
-    };
-  }, [selectedRobotId]);
-
-  // Connection functions
-  const connect = () => {
-    setStatus('connecting');
-    tcpWebSocketService.connect();
+    setCommandSending(true);
+    
+    try {
+      const response = await fetch(`${API_ENDPOINT}/command/ip`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          ip: robotIP,
+          port: robotPort,
+          command: command
+        } as DirectCommandRequest)
+      });
+  
+      const data = await response.json() as DirectCommandResponse;
+      
+      if (data.status === 'success') {
+        console.log(`Lệnh đã được gửi thành công: ${command}`);
+      } else {
+        setErrorMessage(`Lỗi: ${data.message || 'Không thể gửi lệnh'}`);
+        setTimeout(() => setErrorMessage(""), 5000);
+      }
+    } catch (error) {
+      setErrorMessage(`Lỗi: ${(error as Error).message}`);
+      setTimeout(() => setErrorMessage(""), 5000);
+      console.error("Lỗi khi gửi lệnh:", error);
+    } finally {
+      setCommandSending(false);
+    }
   };
   
-  const disconnect = () => {
-    tcpWebSocketService.disconnect();
-    setStatus('disconnected');
-  };
-
+  // Throttled command function to prevent flooding
+  const throttledSendCommand = useCallback((command: string) => {
+    if (commandThrottleRef.current) {
+      clearTimeout(commandThrottleRef.current);
+    }
+    
+    commandThrottleRef.current = setTimeout(() => {
+      sendDirectCommand(command);
+      commandThrottleRef.current = null;
+    }, 100);
+  }, [robotIP, robotPort]);
+  
   // Cập nhật vận tốc và gửi lệnh điều khiển
   const updateVelocities = useCallback((x: number, y: number, theta: number) => {
     const newVelocities = {
@@ -135,19 +192,13 @@ const RobotControlWidget: React.FC = () => {
       Math.abs(newVelocities.y - prevVelocitiesRef.current.y) > 0.05 ||
       Math.abs(newVelocities.theta - prevVelocitiesRef.current.theta) > 0.05;
     
-    if (hasSignificantChange && isConnected) {
+    if (hasSignificantChange && robotIP) {
       prevVelocitiesRef.current = newVelocities;
-      
-      // Gửi lệnh điều khiển qua TCP
-      tcpWebSocketService.sendMessage({
-        type: "motor_control", // Thay đổi thành motor_control để khớp với handler trên server
-        robot_id: selectedRobotId,
-        velocities: newVelocities,
-        frontend: true, // Thêm trường frontend
-        timestamp: Date.now() / 1000
-      });
+      // Đúng định dạng: "dot_x:{value} dot_y:{value} dot_theta:{value}"
+      const command = `dot_x:${newVelocities.x} dot_y:${newVelocities.y} dot_theta:${newVelocities.theta}`;
+      throttledSendCommand(command);
     }
-  }, [isConnected, selectedRobotId]);
+  }, [robotIP, robotPort, throttledSendCommand]);
 
   // Xử lý joystick control
   useEffect(() => {
@@ -454,9 +505,10 @@ const RobotControlWidget: React.FC = () => {
     updateVelocities(x, y, theta);
   }, [maxSpeed, maxAngular, updateVelocities]);
 
+  // Điều khiển từng động cơ
   const setMotorSpeed = useCallback((motorId: number, speed: number): void => {
-    if (!isConnected) {
-      setErrorMessage("TCP service not connected!");
+    if (!robotIP) {
+      setErrorMessage("Địa chỉ IP không được để trống!");
       setTimeout(() => setErrorMessage(""), 5000);
       return;
     }
@@ -466,20 +518,15 @@ const RobotControlWidget: React.FC = () => {
     newSpeeds[motorId-1] = speed;
     setMotorSpeeds(newSpeeds);
     
-    // Send command to TCP server
-    tcpWebSocketService.sendMessage({
-      type: "motor_control",
-      robot_id: selectedRobotId,
-      motor_id: motorId,
-      speed: speed,
-      frontend: true, // Thêm trường frontend
-      timestamp: Date.now() / 1000
-    });
-  }, [isConnected, motorSpeeds, selectedRobotId]);
+    // Đúng định dạng: "MOTOR_{id}_SPEED:{value};"
+    const command = `MOTOR_${motorId}_SPEED:${speed};`;
+    sendDirectCommand(command);
+  }, [motorSpeeds, robotIP, robotPort]);
 
+  // Dừng khẩn cấp
   const emergencyStop = useCallback((): void => {
-    if (!isConnected) {
-      setErrorMessage("TCP service not connected!");
+    if (!robotIP) {
+      setErrorMessage("Địa chỉ IP không được để trống!");
       setTimeout(() => setErrorMessage(""), 5000);
       return;
     }
@@ -501,21 +548,36 @@ const RobotControlWidget: React.FC = () => {
       rotationKnobRef.current.querySelector('.thumb')?.setAttribute('style', `left: ${centerX}px`);
     }
     
-    // Send emergency stop through TCP
-    tcpWebSocketService.sendMessage({ 
-      type: "emergency_stop",
-      robot_id: selectedRobotId,
-      frontend: true, // Thêm trường frontend
-      timestamp: Date.now() / 1000
-    });
-  }, [isConnected, selectedRobotId]);
+    // Gửi lệnh dừng tất cả động cơ
+    const baseCommand = "dot_x:0 dot_y:0 dot_theta:0";
+    sendDirectCommand(baseCommand);
+    
+    // Đồng thời dừng từng động cơ để đảm bảo
+    setTimeout(() => sendDirectCommand("MOTOR_1_SPEED:0;"), 100);
+    setTimeout(() => sendDirectCommand("MOTOR_2_SPEED:0;"), 200);
+    setTimeout(() => sendDirectCommand("MOTOR_3_SPEED:0;"), 300);
+  }, [robotIP, robotPort]);
+
+  // Connection UI elements
+  const connect = () => {
+    if (robotIP) {
+      setStatus('connected');
+    }
+  };
+  
+  const disconnect = () => {
+    setStatus('disconnected');
+  };
+
+  // Thêm isConnected như một biến phái sinh từ status
+  const isConnected = status === 'connected';
 
   return (
     <div className="p-4 bg-white rounded-lg shadow-md">
       <WidgetConnectionHeader
         title="Robot Control"
         status={status}
-        isConnected={isConnected}
+        isConnected={status === 'connected'}
         onConnect={connect}
         onDisconnect={disconnect}
       />
@@ -777,9 +839,66 @@ const RobotControlWidget: React.FC = () => {
         </div>
       )}
 
+      <div className="mt-4 p-3 border rounded-lg bg-gray-50">
+        <div className="font-medium mb-2">Kết nối tới robot</div>
+        <div className="space-y-2">
+          <div className="flex gap-2">
+            <div className="flex-grow">
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Địa chỉ IP (tự động)
+              </label>
+              <input
+                type="text"
+                value={robotIP}
+                readOnly
+                className="w-full border rounded-md px-2 py-1 text-sm bg-gray-100"
+              />
+              <div className="text-xs text-gray-500 mt-1">
+                {autoIpFetching ? 'Đang lấy IP...' : 'IP được lấy tự động từ Direct Bridge'}
+              </div>
+            </div>
+            <div className="w-24">
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Cổng
+              </label>
+              <input
+                type="number"
+                value={robotPort}
+                onChange={(e) => setRobotPort(parseInt(e.target.value) || 12346)}
+                className="w-full border rounded-md px-2 py-1 text-sm"
+              />
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              onClick={() => sendDirectCommand("dot_x:0.5 dot_y:0 dot_theta:0")}
+              className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-2 py-1 rounded text-sm"
+              disabled={!robotIP || commandSending}
+            >
+              Tiến (0.5m/s)
+            </button>
+            <button
+              onClick={() => sendDirectCommand("dot_x:-0.5 dot_y:0 dot_theta:0")}
+              className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-2 py-1 rounded text-sm"
+              disabled={!robotIP || commandSending}
+            >
+              Lùi (0.5m/s)
+            </button>
+            <button
+              onClick={() => sendDirectCommand("dot_x:0 dot_y:0 dot_theta:0")}
+              className="bg-red-100 hover:bg-red-200 text-red-800 px-2 py-1 rounded text-sm"
+              disabled={!robotIP || commandSending}
+            >
+              Dừng
+            </button>
+          </div>
+        </div>
+      </div>
+
       <button
         onClick={emergencyStop}
-        disabled={!isConnected}
+        disabled={!robotIP}
         className="mt-4 bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded font-bold disabled:bg-red-400 disabled:cursor-not-allowed w-full">
         EMERGENCY STOP
       </button>

@@ -5,7 +5,7 @@ REM Set environment paths
 SET PATH=%PATH%;C:\Python311;C:\Python311\Scripts;C:\Program Files\nodejs
 
 REM Set environment variables for ports
-set TCP_PORT=9000
+set TCP_PORT=12346
 set WS_BRIDGE_PORT=9003
 set API_PORT=9004
 set LOG_LEVEL=INFO
@@ -56,13 +56,6 @@ IF NOT EXIST ".\front\.env" (
   echo REACT_APP_WS_BRIDGE_URL=ws://localhost:%WS_BRIDGE_PORT% >> ".\front\.env"
 )
 
-REM Create temporary config file
-echo LOG_LEVEL=%LOG_LEVEL%> ".\back\env_config.txt"
-echo LOG_HEARTBEATS=%LOG_HEARTBEATS%>> ".\back\env_config.txt"
-echo LOG_DETAILED_MESSAGES=%LOG_DETAILED_MESSAGES%>> ".\back\env_config.txt"
-echo TCP_PORT=%TCP_PORT%>> ".\back\env_config.txt"
-echo WS_BRIDGE_PORT=%WS_BRIDGE_PORT%>> ".\back\env_config.txt"
-echo API_PORT=%API_PORT%>> ".\back\env_config.txt"
 
 REM Display starting message
 echo Starting WebDashboard system...

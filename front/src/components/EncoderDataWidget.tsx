@@ -29,7 +29,7 @@ ChartJS.register(
 );
 
 // Modify these constants for faster updates
-const MAX_HISTORY_POINTS = 10000;
+const MAX_HISTORY_POINTS = 10;
 const UI_UPDATE_INTERVAL = 20;
 
 // Cập nhật hàm getWebSocketUrl đảm bảo kết nối đến Backend đúng
@@ -110,99 +110,33 @@ const EncoderDataWidget: React.FC = () => {
   
   // Thay đổi hàm processMessageBuffer để tổng hợp và xử lý dữ liệu theo lô
 const processMessageBuffer = useCallback(() => {
-  // Cancel any pending animation frame
   if (animationFrameId.current !== null) {
     cancelAnimationFrame(animationFrameId.current);
     animationFrameId.current = null;
   }
   
-  // Process all messages in buffer
   if (messageBuffer.current.length === 0) {
     return;
   }
   
-  console.log(`Processing ${messageBuffer.current.length} encoder messages in batch`);
-  
-  // Get all messages for batch processing
-  const messages = [...messageBuffer.current];
+  // Chỉ lấy tin nhắn mới nhất thay vì tất cả
+  const latestMessage = messageBuffer.current[messageBuffer.current.length - 1];
   messageBuffer.current = []; // Clear buffer
   
-  // Tổng hợp dữ liệu theo timestamp để tránh điểm trùng lặp
-  const timestampMap: Map<string, {
-    rpm_1: number,
-    rpm_2: number,
-    rpm_3: number,
-    timestamp: number
-  }> = new Map();
-  
-  // Xử lý tất cả tin nhắn để lấy giá trị mới nhất cho mỗi timestamp
-  for (const message of messages) {
-    if (message.type === 'encoder_data') {
-      const encoderValues = {
-        rpm_1: typeof message.rpm_1 === 'number' ? message.rpm_1 : 0,
-        rpm_2: typeof message.rpm_2 === 'number' ? message.rpm_2 : 0,
-        rpm_3: typeof message.rpm_3 === 'number' ? message.rpm_3 : 0,
-        timestamp: message.timestamp || Date.now() / 1000
-      };
-      
-      // Lấy timestamp đã được làm tròn đến giây (hoặc phần nhỏ hơn nếu muốn)
-      const timeKey = getTimeForData(encoderValues.timestamp);
-      
-      // Cập nhật giá trị mới nhất cho timestamp này
-      timestampMap.set(timeKey, encoderValues);
-    }
-  }
-  
-  // Sử dụng giá trị mới nhất cho hiển thị realtime (luôn cập nhật)
-  if (timestampMap.size > 0) {
-    const latestValues = Array.from(timestampMap.values()).pop();
-    if (latestValues) {
-      setEncoderData(latestValues);
-      setRpmValues([latestValues.rpm_1, latestValues.rpm_2, latestValues.rpm_3]);
-    }
-  }
-  
-  // Chỉ cập nhật biểu đồ nếu không ở chế độ tạm dừng
-  if (!isPaused && timestampMap.size > 0) {
-    setEncoderHistory(prev => {
-      // Tạo mảng mới với các điểm đã tổng hợp, sắp xếp theo thời gian
-      const sortedEntries = Array.from(timestampMap.entries())
-        .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]));
-      
-      // Tách các mảng mới để thêm vào history
-      const newTimestamps = sortedEntries.map(([timeKey]) => timeKey);
-      const newEncoder1 = sortedEntries.map(([, values]) => values.rpm_1);
-      const newEncoder2 = sortedEntries.map(([, values]) => values.rpm_2);
-      const newEncoder3 = sortedEntries.map(([, values]) => values.rpm_3);
-      
-      // Kết hợp với dữ liệu trước đó
-      const combinedTimestamps = [...prev.timestamps, ...newTimestamps];
-      const combinedEncoder1 = [...prev.encoder1, ...newEncoder1];
-      const combinedEncoder2 = [...prev.encoder2, ...newEncoder2];
-      const combinedEncoder3 = [...prev.encoder3, ...newEncoder3];
-      
-      // Giới hạn số điểm trong history
-      if (combinedTimestamps.length > MAX_HISTORY_POINTS) {
-        return {
-          timestamps: combinedTimestamps.slice(-MAX_HISTORY_POINTS),
-          encoder1: combinedEncoder1.slice(-MAX_HISTORY_POINTS),
-          encoder2: combinedEncoder2.slice(-MAX_HISTORY_POINTS),
-          encoder3: combinedEncoder3.slice(-MAX_HISTORY_POINTS)
-        };
-      }
-      
-      return {
-        timestamps: combinedTimestamps,
-        encoder1: combinedEncoder1,
-        encoder2: combinedEncoder2,
-        encoder3: combinedEncoder3
-      };
+  if (latestMessage.type === 'encoder_data') {
+    // Cập nhật giá trị hiện tại
+    setEncoderData({
+      rpm_1: latestMessage.rpm_1 || 0,
+      rpm_2: latestMessage.rpm_2 || 0,
+      rpm_3: latestMessage.rpm_3 || 0,
+      timestamp: latestMessage.timestamp || Date.now() / 1000
     });
+    setRpmValues([latestMessage.rpm_1 || 0, latestMessage.rpm_2 || 0, latestMessage.rpm_3 || 0]);
+    
+    // Tắt cập nhật lịch sử - đây là phần gây tràn bộ nhớ
+    // setEncoderHistory(prev => { ... }); 
   }
-  
-  lastUIUpdateTime.current = Date.now();
-  console.log(`UI updated at ${new Date().toLocaleTimeString()} with ${timestampMap.size} data points`);
-}, [isPaused]);
+}, []);
 
   // Schedule UI updates using requestAnimationFrame for smoother performance
   const scheduleUIUpdate = useCallback(() => {
@@ -339,11 +273,13 @@ newSocket.onmessage = (event) => {
       console.log("Processing encoder values:", values);
       
       // Update message buffer
-      messageBuffer.current.push({
+      messageBuffer.current = [{
         type: 'encoder_data',
-        ...values,
-        original: data // Lưu trữ dữ liệu gốc
-      });
+        rpm_1: values.rpm_1,
+        rpm_2: values.rpm_2,
+        rpm_3: values.rpm_3,
+        timestamp: values.timestamp
+      }];
       
       // Cập nhật timestamp gần nhất
       lastDataTimestamp.current = values.timestamp;
