@@ -38,6 +38,17 @@ interface DirectCommandResponse {
   message?: string;
 }
 
+// Thêm interface cho giao tiếp qua robot_id
+interface RobotCommandRequest {
+  robot_id: string;
+  command: string;
+}
+
+interface RobotCommandResponse {
+  status: string;
+  message?: string;
+}
+
 const API_ENDPOINT = 'http://localhost:9004';
 
 const RobotControlWidget: React.FC = () => {
@@ -170,10 +181,10 @@ const RobotControlWidget: React.FC = () => {
     }
     
     commandThrottleRef.current = setTimeout(() => {
-      sendDirectCommand(command);
+      sendCommand(selectedRobotId, command);
       commandThrottleRef.current = null;
     }, 100);
-  }, [robotIP, robotPort]);
+  }, [selectedRobotId]);
   
   // Cập nhật vận tốc và gửi lệnh điều khiển
   const updateVelocities = useCallback((x: number, y: number, theta: number) => {
@@ -192,13 +203,13 @@ const RobotControlWidget: React.FC = () => {
       Math.abs(newVelocities.y - prevVelocitiesRef.current.y) > 0.05 ||
       Math.abs(newVelocities.theta - prevVelocitiesRef.current.theta) > 0.05;
     
-    if (hasSignificantChange && robotIP) {
+    if (hasSignificantChange && selectedRobotId) {
       prevVelocitiesRef.current = newVelocities;
       // Đúng định dạng: "dot_x:{value} dot_y:{value} dot_theta:{value}"
       const command = `dot_x:${newVelocities.x} dot_y:${newVelocities.y} dot_theta:${newVelocities.theta}`;
       throttledSendCommand(command);
     }
-  }, [robotIP, robotPort, throttledSendCommand]);
+  }, [selectedRobotId, throttledSendCommand]);
 
   // Xử lý joystick control
   useEffect(() => {
@@ -507,8 +518,8 @@ const RobotControlWidget: React.FC = () => {
 
   // Điều khiển từng động cơ
   const setMotorSpeed = useCallback((motorId: number, speed: number): void => {
-    if (!robotIP) {
-      setErrorMessage("Địa chỉ IP không được để trống!");
+    if (!selectedRobotId) {
+      setErrorMessage("Không có robot nào được chọn!");
       setTimeout(() => setErrorMessage(""), 5000);
       return;
     }
@@ -520,13 +531,13 @@ const RobotControlWidget: React.FC = () => {
     
     // Đúng định dạng: "MOTOR_{id}_SPEED:{value};"
     const command = `MOTOR_${motorId}_SPEED:${speed};`;
-    sendDirectCommand(command);
-  }, [motorSpeeds, robotIP, robotPort]);
+    sendCommand(selectedRobotId, command);
+  }, [motorSpeeds, selectedRobotId]);
 
   // Dừng khẩn cấp
   const emergencyStop = useCallback((): void => {
-    if (!robotIP) {
-      setErrorMessage("Địa chỉ IP không được để trống!");
+    if (!selectedRobotId) {
+      setErrorMessage("Không có robot nào được chọn!");
       setTimeout(() => setErrorMessage(""), 5000);
       return;
     }
@@ -550,13 +561,13 @@ const RobotControlWidget: React.FC = () => {
     
     // Gửi lệnh dừng tất cả động cơ
     const baseCommand = "dot_x:0 dot_y:0 dot_theta:0";
-    sendDirectCommand(baseCommand);
+    sendCommand(selectedRobotId, baseCommand);
     
     // Đồng thời dừng từng động cơ để đảm bảo
-    setTimeout(() => sendDirectCommand("MOTOR_1_SPEED:0;"), 100);
-    setTimeout(() => sendDirectCommand("MOTOR_2_SPEED:0;"), 200);
-    setTimeout(() => sendDirectCommand("MOTOR_3_SPEED:0;"), 300);
-  }, [robotIP, robotPort]);
+    setTimeout(() => sendCommand(selectedRobotId, "MOTOR_1_SPEED:0;"), 100);
+    setTimeout(() => sendCommand(selectedRobotId, "MOTOR_2_SPEED:0;"), 200);
+    setTimeout(() => sendCommand(selectedRobotId, "MOTOR_3_SPEED:0;"), 300);
+  }, [selectedRobotId]);
 
   // Connection UI elements
   const connect = () => {
@@ -571,6 +582,60 @@ const RobotControlWidget: React.FC = () => {
 
   // Thêm isConnected như một biến phái sinh từ status
   const isConnected = status === 'connected';
+
+  // Các interface và hàm này hiện tại không được sử dụng nhưng sẽ hữu ích khi mở rộng hệ thống
+  // Giữ lại dưới dạng comment để dễ phục hồi sau này
+  /*
+  // Interface for the command request
+  interface RobotCommandRequest {
+    robot_id: string;
+    command: string;
+  }
+
+  // Interface for the command response
+  interface RobotCommandResponse {
+    status: string;
+    message?: string;
+  }
+  */
+
+  const sendCommand = async (robotId: string, command: string): Promise<void> => {
+    if (!robotId) {
+      setErrorMessage("ID của robot không được để trống!");
+      setTimeout(() => setErrorMessage(""), 5000);
+      return;
+    }
+    
+    setCommandSending(true);
+    
+    try {
+      console.log(`Sending command to robot ${robotId}: ${command}`);
+      const response = await fetch(`${API_ENDPOINT}/command/robot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          robot_id: robotId, 
+          command: command 
+        })
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Server responded with status ${response.status}: ${errorText}`);
+      }
+      
+      const data = await response.json();
+      if (data.status !== 'success') {
+        throw new Error(data.message || 'Không thể gửi lệnh');
+      }
+    } catch (error) {
+      setErrorMessage(`Lỗi: ${(error as Error).message}`);
+      setTimeout(() => setErrorMessage(""), 5000);
+      console.error("Error sending command:", error);
+    } finally {
+      setCommandSending(false);
+    }
+  };
 
   return (
     <div className="p-4 bg-white rounded-lg shadow-md">
@@ -872,23 +937,23 @@ const RobotControlWidget: React.FC = () => {
           
           <div className="grid grid-cols-3 gap-2">
             <button
-              onClick={() => sendDirectCommand("dot_x:0.5 dot_y:0 dot_theta:0")}
+              onClick={() => sendCommand(selectedRobotId, "dot_x:0.5 dot_y:0 dot_theta:0")}
               className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-2 py-1 rounded text-sm"
-              disabled={!robotIP || commandSending}
+              disabled={!selectedRobotId || commandSending}
             >
               Tiến (0.5m/s)
             </button>
             <button
-              onClick={() => sendDirectCommand("dot_x:-0.5 dot_y:0 dot_theta:0")}
+              onClick={() => sendCommand(selectedRobotId, "dot_x:-0.5 dot_y:0 dot_theta:0")}
               className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-2 py-1 rounded text-sm"
-              disabled={!robotIP || commandSending}
+              disabled={!selectedRobotId || commandSending}
             >
               Lùi (0.5m/s)
             </button>
             <button
-              onClick={() => sendDirectCommand("dot_x:0 dot_y:0 dot_theta:0")}
-              className="bg-red-100 hover:bg-red-200 text-red-800 px-2 py-1 rounded text-sm"
-              disabled={!robotIP || commandSending}
+              onClick={() => sendCommand(selectedRobotId, "dot_x:0 dot_y:0 dot_theta:0")}
+              className="bg-red-100 hover:bg-red-200 text-red-800 px-2 py-1 rounded text-sm" 
+              disabled={!selectedRobotId || commandSending}
             >
               Dừng
             </button>

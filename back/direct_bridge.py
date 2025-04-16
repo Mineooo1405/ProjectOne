@@ -820,9 +820,33 @@ async def send_command_by_ip(request):
         if not ip or not command:
             return web.json_response({"status": "error", "message": "Missing ip or command"})
         
-        logger.info(f"Sending command to {ip}:{port}: {command}")
+        logger.info(f"Sending command to {ip}: {command}")
         
-        # Thử kết nối với timeout dài hơn
+        # Tìm robot_id từ địa chỉ IP
+        robot_id = None
+        for rid, addr in getattr(ConnectionManager, '_robot_to_addr', {}).items():
+            if addr and addr[0] == ip:
+                robot_id = rid
+                break
+        
+        # Nếu tìm được robot_id, sử dụng kết nối hiện có
+        if robot_id:
+            tcp_client = ConnectionManager.get_tcp_client(robot_id)
+            if tcp_client:
+                try:
+                    _, writer = tcp_client
+                    writer.write(f"{command}\n".encode())
+                    await writer.drain()
+                    
+                    return web.json_response({
+                        "status": "success", 
+                        "message": f"Command sent to {ip} via existing connection for robot {robot_id}"
+                    })
+                except Exception as e:
+                    logger.error(f"Error using existing connection: {str(e)}")
+                    # Nếu lỗi, thử phương pháp tạo kết nối mới
+            
+        # Nếu không tìm thấy kết nối hiện có hoặc lỗi, tạo kết nối mới
         try:
             # Tăng timeout lên 3 giây
             reader, writer = await asyncio.wait_for(
@@ -858,6 +882,48 @@ async def send_command_by_ip(request):
     except Exception as e:
         logger.error(f"Error processing command request: {str(e)}")
         return web.json_response({"status": "error", "message": str(e)})
+
+# Thêm endpoint mới sau @routes.post('/command/ip')
+@routes.post('/command/robot')
+async def send_command_by_robot_id(request):
+    """Gửi lệnh điều khiển đến robot dựa trên robot_id"""
+    try:
+        data = await request.json()
+        robot_id = data.get('robot_id')
+        command = data.get('command')
+        
+        if not robot_id or not command:
+            return web.json_response({"status": "error", "message": "Missing robot_id or command"})
+        
+        logger.info(f"Sending command to robot {robot_id}: {command}")
+        
+        # Sử dụng kết nối hiện có thay vì tạo kết nối mới
+        tcp_client = ConnectionManager.get_tcp_client(robot_id)
+        if not tcp_client:
+            return web.json_response({
+                "status": "error", 
+                "message": f"Robot {robot_id} is not connected"
+            }, status=404)
+        
+        try:
+            _, writer = tcp_client
+            # Gửi lệnh qua kết nối TCP hiện có
+            writer.write(f"{command}\n".encode())
+            await writer.drain()
+            
+            return web.json_response({
+                "status": "success", 
+                "message": f"Command sent to robot {robot_id} via existing connection"
+            })
+        
+        except Exception as e:
+            logger.error(f"Error sending command to robot {robot_id}: {str(e)}")
+            return web.json_response({"status": "error", "message": str(e)})
+    
+    except Exception as e:
+        logger.error(f"Error processing command request: {str(e)}")
+        return web.json_response({"status": "error", "message": str(e)})
+
 # Thêm middleware xử lý CORS
 @middleware
 async def cors_middleware(request: Request, handler):
@@ -901,6 +967,15 @@ async def register_robot(request):
         return web.json_response(response)
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)})
+
+# Sửa lại ConnectionManager để xử lý gửi lệnh qua kết nối có sẵn
+def send_command_to_robot(self, robot_id, command):
+    """Gửi lệnh đến robot qua kết nối có sẵn"""
+    if robot_id in self.robots:
+        writer = self.robots[robot_id].writer
+        writer.write(f"{command}\n".encode())
+        return {"status": "success", "message": f"Command sent to {robot_id}"}
+    return {"status": "error", "message": f"Robot {robot_id} not connected"}
 
 # Main function
 async def main():

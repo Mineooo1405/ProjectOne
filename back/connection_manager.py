@@ -164,3 +164,25 @@ class ConnectionManager:
                 "has_tcp": robot_id in cls._tcp_clients
             }
         return stats
+
+    @classmethod
+    def get_addr_by_robot_id(cls, robot_id):
+        """
+        Get the address (IP, port) for a robot by its ID
+        
+        Args:
+            robot_id: The ID of the robot
+            
+        Returns:
+            tuple: (IP, port) tuple or None if not found
+        """
+        # Normalize robot ID trước khi tìm kiếm
+        robot_id = cls.normalize_robot_id(robot_id)
+        
+        # Lấy địa chỉ từ _robot_to_addr dict
+        addr = cls._robot_to_addr.get(robot_id)
+        
+        if addr and isinstance(addr, tuple) and len(addr) == 2:
+            return addr
+        
+        return None
